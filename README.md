@@ -1,5 +1,7 @@
 # Chrome DevTools MCP Server
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 一个基于 Model Context Protocol (MCP) 的 Chrome DevTools 控制服务器，为 AI 辅助前端开发提供强大的浏览器调试能力。
 
 ## 功能特性
@@ -390,7 +392,19 @@ claude-code
 
 ## 许可证
 
-MIT License
+本项目采用 [MIT 许可证](LICENSE) 开源。
+
+MIT License - 详细信息请查看 [LICENSE](LICENSE) 文件。
+
+该许可证允许您：
+- ✅ 商业使用
+- ✅ 修改
+- ✅ 分发
+- ✅ 私人使用
+
+只要您：
+- 📄 包含版权声明和许可证声明
+- 📝 说明所做的更改（如有修改）
 
 ## 相关链接
 
