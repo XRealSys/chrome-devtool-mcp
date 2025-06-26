@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chrome-devtools-mcp"
+version = "1.0.0"
+description = "Chrome DevTools MCP Server for AI-assisted frontend development"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "Chrome DevTools MCP Team"},
+]
+keywords = ["mcp", "chrome", "devtools", "debugging", "frontend", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Testing",
+]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "websockets>=10.0",
+    "aiohttp>=3.8.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.24.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/chrome-devtools-mcp"
+Repository = "https://github.com/yourusername/chrome-devtools-mcp.git"
+Issues = "https://github.com/yourusername/chrome-devtools-mcp/issues"
+
+[project.scripts]
+chrome-devtools-mcp = "src.chrome_devtools_mcp:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "tests*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.txt", "*.sh"]
