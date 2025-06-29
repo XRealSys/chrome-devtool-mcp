@@ -916,36 +916,46 @@ async def get_page_info() -> Dict[str, Any]:
         }
 
 
-@mcp.tool(description="Set a JavaScript breakpoint at a specific location. Can break on DOM events, function calls, or specific code lines.")
+@mcp.tool(description="Set a JavaScript breakpoint at a specific location. Supports both pausing breakpoints and non-pausing log breakpoints (logpoints).")
 async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Dict] = None) -> Dict[str, Any]:
     """
     Set a breakpoint in JavaScript code.
     
     Args:
-        breakpoint_type: Type of breakpoint - 'dom', 'event', 'function', 'xhr', 'line'
+        breakpoint_type: Type of breakpoint - 'dom', 'event', 'function', 'xhr', 'line', 'logpoint'
         target: Target for the breakpoint (e.g., selector for DOM, function name, URL:line for line)
-        options: Additional options like conditions, actions, etc.
+        options: Additional options like conditions, actions, log messages, etc.
+                 - condition: Conditional expression
+                 - logMessage: Message to log (for logpoints)
+                 - pause: Whether to pause execution (default: False for logpoints, True for others)
     """
     try:
         await chrome.ensure_connected()
         options = options or {}
         
+        # Determine if this should pause execution
+        should_pause = options.get('pause', breakpoint_type != 'logpoint')
+        log_message = options.get('logMessage', '')
+        
         if breakpoint_type == 'dom':
-            # Set DOM breakpoint using event listener breakpoint
-            result = await chrome._send_command("DOMDebugger.setEventListenerBreakpoint", {
-                "eventName": "click",
-                "targetName": target
-            })
+            # Set DOM breakpoint using event listener
+            dom_log_msg = log_message or f'DOM Event: Click on {target}'
             
-            # Also inject a mutation observer for DOM changes
             await chrome._send_command("Runtime.evaluate", {
                 "expression": f"""
                     (function() {{
                         const targetElement = document.querySelector('{target}');
                         if (targetElement) {{
                             targetElement.addEventListener('click', function(e) {{
-                                console.log('Breakpoint hit: Click on', e.target);
-                                debugger;
+                                console.log('🔍 BREAKPOINT:', '{dom_log_msg}', {{
+                                    target: e.target,
+                                    element: '{target}',
+                                    timestamp: new Date().toISOString(),
+                                    eventType: e.type,
+                                    clientX: e.clientX,
+                                    clientY: e.clientY
+                                }});
+                                {"debugger;" if should_pause else ""}
                             }}, true);
                         }}
                     }})()
@@ -960,9 +970,8 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
             
         elif breakpoint_type == 'function':
             # Set breakpoint on function call
-            condition = f"this.name === '{target}' || arguments.callee.name === '{target}'"
-            if options.get('condition'):
-                condition = f"({condition}) && ({options['condition']})"
+            func_log_msg = log_message or f'Function {target} called'
+            condition = options.get('condition', '')
                 
             await chrome._send_command("Runtime.evaluate", {
                 "expression": f"""
@@ -970,8 +979,16 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
                         const originalFunc = window['{target}'] || eval('{target}');
                         if (typeof originalFunc === 'function') {{
                             const wrapped = function(...args) {{
-                                console.log('Breakpoint: Function {target} called with', args);
-                                debugger;
+                                {f"if ({condition}) {{" if condition else ""}
+                                console.log('🔍 BREAKPOINT:', '{func_log_msg}', {{
+                                    function: '{target}',
+                                    arguments: args,
+                                    timestamp: new Date().toISOString(),
+                                    caller: arguments.callee.caller ? arguments.callee.caller.name : 'anonymous',
+                                    this: this
+                                }});
+                                {"debugger;" if should_pause else ""}
+                                {f"}}" if condition else ""}
                                 return originalFunc.apply(this, args);
                             }};
                             if (window['{target}']) {{
@@ -989,8 +1006,8 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
                 "url": url_pattern
             })
             
-        elif breakpoint_type == 'line':
-            # Set line breakpoint
+        elif breakpoint_type == 'line' or breakpoint_type == 'logpoint':
+            # Set line breakpoint or logpoint
             # Format: "url:lineNumber" or "scriptId:lineNumber"
             parts = target.split(':')
             if len(parts) == 2:
@@ -1003,6 +1020,18 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
                     if location in script['url'] or sid == location:
                         script_id = sid
                         break
+                
+                # Prepare condition for logpoint
+                if breakpoint_type == 'logpoint' and not should_pause:
+                    # Create a condition that logs but doesn't break
+                    log_expr = log_message or f"Line {line + 1} executed"
+                    # Use console.log in condition and return false to not break
+                    condition_expr = f"console.log('🔍 LOGPOINT:', '{log_expr}', {{line: {line + 1}, url: '{location}', timestamp: new Date().toISOString(), locals: this}}), false"
+                    if options.get('condition'):
+                        # Combine with user condition
+                        condition_expr = f"({options['condition']}) && ({condition_expr})"
+                else:
+                    condition_expr = options.get('condition', '')
                         
                 if script_id:
                     result = await chrome._send_command("Debugger.setBreakpoint", {
@@ -1010,21 +1039,22 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
                             "scriptId": script_id,
                             "lineNumber": line
                         },
-                        "condition": options.get('condition', '')
+                        "condition": condition_expr
                     })
                     
                     if 'breakpointId' in result:
                         chrome.breakpoints[result['breakpointId']] = {
-                            'type': 'line',
+                            'type': breakpoint_type,
                             'location': target,
-                            'actualLocation': result.get('actualLocation')
+                            'actualLocation': result.get('actualLocation'),
+                            'logMessage': log_message if breakpoint_type == 'logpoint' else None
                         }
                 else:
                     # Set by URL pattern
                     result = await chrome._send_command("Debugger.setBreakpointByUrl", {
                         "lineNumber": line,
                         "urlRegex": f".*{location}.*",
-                        "condition": options.get('condition', '')
+                        "condition": condition_expr
                     })
         
         return {

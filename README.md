@@ -450,18 +450,23 @@ connect_websocket_url(ws_url)
 无参数。
 
 ### set_breakpoint
-设置 JavaScript 断点。
+设置 JavaScript 断点。支持传统断点和日志断点（logpoint）。
 
 参数：
-- `breakpoint_type` (str): 断点类型 - 'dom', 'event', 'function', 'xhr', 'line'
+- `breakpoint_type` (str): 断点类型 - 'dom', 'event', 'function', 'xhr', 'line', 'logpoint'
 - `target` (str): 断点目标（如 DOM 选择器、函数名、URL:行号）
-- `options` (dict, optional): 额外选项，如条件、动作等
+- `options` (dict, optional): 额外选项
+  - `condition`: 条件表达式，只在条件为真时触发
+  - `logMessage`: 日志消息（用于日志断点）
+  - `pause`: 是否暂停执行（默认：logpoint 为 False，其他为 True）
 
 示例：
 - DOM 断点：`set_breakpoint('dom', '#login-button')`
 - 函数断点：`set_breakpoint('function', 'handleLogin')`
 - 行断点：`set_breakpoint('line', 'app.js:42')`
 - XHR 断点：`set_breakpoint('xhr', '/api/login')`
+- 日志断点：`set_breakpoint('function', 'processData', {'logMessage': 'Processing data...', 'pause': False})`
+- 条件日志断点：`set_breakpoint('function', 'validate', {'condition': 'value < 0', 'logMessage': 'Invalid value', 'pause': False})`
 
 ### list_breakpoints
 列出所有活动断点。
