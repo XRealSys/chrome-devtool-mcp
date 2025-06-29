@@ -369,13 +369,26 @@ class ChromeInstance:
         
     async def _handle_console_message(self, params: Dict):
         """Handle console messages"""
+        message = params.get('message', {})
+        
         entry = {
             "timestamp": datetime.now().isoformat(),
-            "level": params.get('level', 'log'),
-            "text": params.get('text', '')
+            "level": message.get('level', 'log'),
+            "text": message.get('text', '')
         }
         
         # Try to extract text from args if text is empty
+        if not entry['text'] and 'args' in message:
+            args_text = []
+            for arg in message['args']:
+                if 'value' in arg:
+                    args_text.append(str(arg['value']))
+                elif 'description' in arg:
+                    args_text.append(arg['description'])
+            if args_text:
+                entry['text'] = ' '.join(args_text)
+                
+        # Also check the older format
         if not entry['text'] and 'args' in params:
             args_text = []
             for arg in params['args']:
