@@ -54,6 +54,85 @@ class ChromeInstance:
         self.network_logs: List[Dict] = []
         self.debugging_port: int = 9222
         
+    async def connect_remote(self, host: str = "localhost", port: int = 9222) -> Dict[str, Any]:
+        """Connect to a remote Chrome/Chromium instance via CDP"""
+        self.debugging_port = port
+        remote_url = f"http://{host}:{port}"
+        
+        try:
+            # Connect to remote Chrome DevTools
+            async with aiohttp.ClientSession() as session:
+                # Get the list of pages
+                async with session.get(f"{remote_url}/json/list") as resp:
+                    if resp.status != 200:
+                        raise Exception(f"Failed to connect to remote Chrome at {remote_url}")
+                    pages = await resp.json()
+                    
+                # Find a suitable page or use the first one
+                target_page = None
+                for page in pages:
+                    if page.get('type') == 'page' and 'devtools' not in page.get('url', ''):
+                        target_page = page
+                        break
+                        
+                if not target_page and pages:
+                    target_page = pages[0]
+                    
+                if not target_page:
+                    raise Exception("No pages available in remote Chrome")
+                    
+                self.ws_url = target_page['webSocketDebuggerUrl']
+                # Replace localhost with the actual host if needed
+                if host != "localhost" and "ws://localhost" in self.ws_url:
+                    self.ws_url = self.ws_url.replace("ws://localhost", f"ws://{host}")
+                    
+                logger.info(f"Connecting to remote page: {target_page.get('url', 'about:blank')}")
+                
+            await self._connect_websocket()
+            
+            return {
+                "status": "connected",
+                "host": host,
+                "port": port,
+                "ws_url": self.ws_url,
+                "page_url": target_page.get('url', 'about:blank')
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to remote Chrome at {remote_url}: {e}")
+            raise
+    
+    async def connect_with_websocket_url(self, ws_url: str) -> Dict[str, Any]:
+        """Connect directly using a WebSocket debugger URL"""
+        try:
+            self.ws_url = ws_url
+            logger.info(f"Connecting directly to WebSocket URL: {ws_url}")
+            
+            await self._connect_websocket()
+            
+            # Try to get page info
+            page_info = {}
+            try:
+                result = await self._send_command("Runtime.evaluate", {
+                    "expression": "({url: window.location.href, title: document.title})",
+                    "returnByValue": True
+                })
+                if result and 'result' in result and 'value' in result['result']:
+                    page_info = result['result']['value']
+            except:
+                pass
+            
+            return {
+                "status": "connected",
+                "ws_url": self.ws_url,
+                "page_url": page_info.get('url', 'unknown'),
+                "page_title": page_info.get('title', 'unknown')
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to connect via WebSocket URL {ws_url}: {e}")
+            raise
+    
     async def launch(self, headless: bool = False, port: int = 9222) -> Dict[str, Any]:
         """Launch Chrome with remote debugging enabled"""
         if self.process and self.process.poll() is None:
@@ -154,8 +233,37 @@ class ChromeInstance:
             "pid": self.process.pid
         }
         
+    async def _disconnect_websocket(self):
+        """Disconnect current WebSocket connection if exists"""
+        if hasattr(self, '_listener_task') and self._listener_task:
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
+            
+        if self.ws:
+            await self.ws.close()
+            self.ws = None
+            
+        # Clear state
+        self.pending_messages.clear()
+        self.console_logs.clear()
+        self.network_logs.clear()
+        if hasattr(self, 'breakpoints'):
+            self.breakpoints.clear()
+        if hasattr(self, 'scripts'):
+            self.scripts.clear()
+        if hasattr(self, 'paused_data'):
+            self.paused_data = None
+            
+        logger.info("Disconnected from Chrome DevTools")
+    
     async def _connect_websocket(self):
         """Connect to Chrome DevTools WebSocket"""
+        # Disconnect any existing connection
+        await self._disconnect_websocket()
+        
         self.ws = await websockets.connect(self.ws_url, max_size=None)
         
         # Start message listener
@@ -173,10 +281,25 @@ class ChromeInstance:
             logger.error(f"Error enabling Chrome DevTools domains: {e}")
             raise
         
+        # Enable Debugger domain for breakpoints
+        try:
+            await self._send_command("Debugger.enable")
+            logger.info("Successfully enabled Debugger domain")
+        except Exception as e:
+            logger.warning(f"Could not enable Debugger domain: {e}")
+        
         # Set up event handlers
         self.event_handlers['Console.messageAdded'] = self._handle_console_message
         self.event_handlers['Network.requestWillBeSent'] = self._handle_network_request
         self.event_handlers['Network.responseReceived'] = self._handle_network_response
+        self.event_handlers['Debugger.paused'] = self._handle_debugger_paused
+        self.event_handlers['Debugger.scriptParsed'] = self._handle_script_parsed
+        
+        # Storage for breakpoints and scripts
+        self.breakpoints = {}
+        self.scripts = {}
+        self.paused_data = None
+        self.auto_resume = False
         
     async def _message_listener(self):
         """Listen for messages from Chrome DevTools"""
@@ -301,6 +424,30 @@ class ChromeInstance:
         # Keep only last 1000 logs
         if len(self.network_logs) > 1000:
             self.network_logs = self.network_logs[-1000:]
+    
+    async def _handle_debugger_paused(self, params: Dict):
+        """Handle debugger pause events"""
+        self.paused_data = params
+        logger.info(f"Debugger paused at {params.get('reason', 'unknown reason')}")
+        
+        # Auto-resume if configured
+        if hasattr(self, 'auto_resume') and self.auto_resume:
+            await asyncio.sleep(0.1)  # Brief pause to allow data collection
+            await self._send_command("Debugger.resume")
+    
+    async def _handle_script_parsed(self, params: Dict):
+        """Handle script parsed events"""
+        script_id = params.get('scriptId')
+        url = params.get('url', '')
+        if script_id and url:
+            self.scripts[script_id] = {
+                'url': url,
+                'scriptId': script_id,
+                'startLine': params.get('startLine', 0),
+                'startColumn': params.get('startColumn', 0),
+                'endLine': params.get('endLine', 0),
+                'endColumn': params.get('endColumn', 0)
+            }
         
     async def close(self):
         """Close Chrome instance and WebSocket connection"""
@@ -362,6 +509,86 @@ chrome = ChromeInstance()
 
 
 # Tool definitions
+@mcp.tool(description="Connect to a remote Chrome/Chromium instance (e.g., Electron app) via Chrome DevTools Protocol. Use this instead of launching a new Chrome when debugging an already running application.")
+async def connect_remote_chrome(host: str = "localhost", port: int = 9222) -> Dict[str, Any]:
+    """Connect to a remote Chrome/Chromium instance via CDP"""
+    try:
+        result = await chrome.connect_remote(host=host, port=port)
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        logger.error(f"Failed to connect to remote Chrome: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Connect directly to Chrome DevTools using a WebSocket debugger URL. This allows switching between different tabs/pages or connecting to specific debugging sessions.")
+async def connect_websocket_url(ws_url: str) -> Dict[str, Any]:
+    """Connect directly using a WebSocket debugger URL
+    
+    Args:
+        ws_url: WebSocket URL like 'ws://localhost:9222/devtools/page/ABC123'
+    """
+    try:
+        result = await chrome.connect_with_websocket_url(ws_url=ws_url)
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        logger.error(f"Failed to connect via WebSocket URL: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="List all available Chrome tabs/pages with their WebSocket URLs. Useful for switching between different debugging targets.")
+async def list_available_targets(host: str = "localhost", port: int = 9222) -> Dict[str, Any]:
+    """List all available debugging targets (tabs/pages)
+    
+    Args:
+        host: Chrome host address
+        port: Chrome debugging port
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://{host}:{port}/json/list") as resp:
+                if resp.status != 200:
+                    raise Exception(f"Failed to get targets from Chrome at {host}:{port}")
+                targets = await resp.json()
+                
+        # Format the targets for easier reading
+        formatted_targets = []
+        for target in targets:
+            formatted_targets.append({
+                "title": target.get("title", ""),
+                "url": target.get("url", ""),
+                "type": target.get("type", ""),
+                "id": target.get("id", ""),
+                "webSocketDebuggerUrl": target.get("webSocketDebuggerUrl", "")
+            })
+                
+        return {
+            "success": True,
+            "data": {
+                "targets": formatted_targets,
+                "count": len(formatted_targets),
+                "current_ws_url": chrome.ws_url if chrome.ws else None
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to list targets: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 @mcp.tool(description="Launch a Chrome browser instance for development and debugging. This is the starting point for frontend development debugging.")
 async def launch_chrome(headless: bool = False, port: int = 9222) -> Dict[str, Any]:
     """Launch Chrome with remote debugging enabled"""
@@ -676,6 +903,242 @@ async def get_page_info() -> Dict[str, Any]:
         }
 
 
+@mcp.tool(description="Set a JavaScript breakpoint at a specific location. Can break on DOM events, function calls, or specific code lines.")
+async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Dict] = None) -> Dict[str, Any]:
+    """
+    Set a breakpoint in JavaScript code.
+    
+    Args:
+        breakpoint_type: Type of breakpoint - 'dom', 'event', 'function', 'xhr', 'line'
+        target: Target for the breakpoint (e.g., selector for DOM, function name, URL:line for line)
+        options: Additional options like conditions, actions, etc.
+    """
+    try:
+        await chrome.ensure_connected()
+        options = options or {}
+        
+        if breakpoint_type == 'dom':
+            # Set DOM breakpoint using event listener breakpoint
+            result = await chrome._send_command("DOMDebugger.setEventListenerBreakpoint", {
+                "eventName": "click",
+                "targetName": target
+            })
+            
+            # Also inject a mutation observer for DOM changes
+            await chrome._send_command("Runtime.evaluate", {
+                "expression": f"""
+                    (function() {{
+                        const targetElement = document.querySelector('{target}');
+                        if (targetElement) {{
+                            targetElement.addEventListener('click', function(e) {{
+                                console.log('Breakpoint hit: Click on', e.target);
+                                debugger;
+                            }}, true);
+                        }}
+                    }})()
+                """
+            })
+            
+        elif breakpoint_type == 'event':
+            # Set event listener breakpoint
+            result = await chrome._send_command("DOMDebugger.setEventListenerBreakpoint", {
+                "eventName": target
+            })
+            
+        elif breakpoint_type == 'function':
+            # Set breakpoint on function call
+            condition = f"this.name === '{target}' || arguments.callee.name === '{target}'"
+            if options.get('condition'):
+                condition = f"({condition}) && ({options['condition']})"
+                
+            await chrome._send_command("Runtime.evaluate", {
+                "expression": f"""
+                    (function() {{
+                        const originalFunc = window['{target}'] || eval('{target}');
+                        if (typeof originalFunc === 'function') {{
+                            const wrapped = function(...args) {{
+                                console.log('Breakpoint: Function {target} called with', args);
+                                debugger;
+                                return originalFunc.apply(this, args);
+                            }};
+                            if (window['{target}']) {{
+                                window['{target}'] = wrapped;
+                            }}
+                        }}
+                    }})()
+                """
+            })
+            
+        elif breakpoint_type == 'xhr':
+            # Set XHR/fetch breakpoint
+            url_pattern = target
+            result = await chrome._send_command("DOMDebugger.setXHRBreakpoint", {
+                "url": url_pattern
+            })
+            
+        elif breakpoint_type == 'line':
+            # Set line breakpoint
+            # Format: "url:lineNumber" or "scriptId:lineNumber"
+            parts = target.split(':')
+            if len(parts) == 2:
+                location = parts[0]
+                line = int(parts[1]) - 1  # Convert to 0-based
+                
+                # Try to find script by URL
+                script_id = None
+                for sid, script in chrome.scripts.items():
+                    if location in script['url'] or sid == location:
+                        script_id = sid
+                        break
+                        
+                if script_id:
+                    result = await chrome._send_command("Debugger.setBreakpoint", {
+                        "location": {
+                            "scriptId": script_id,
+                            "lineNumber": line
+                        },
+                        "condition": options.get('condition', '')
+                    })
+                    
+                    if 'breakpointId' in result:
+                        chrome.breakpoints[result['breakpointId']] = {
+                            'type': 'line',
+                            'location': target,
+                            'actualLocation': result.get('actualLocation')
+                        }
+                else:
+                    # Set by URL pattern
+                    result = await chrome._send_command("Debugger.setBreakpointByUrl", {
+                        "lineNumber": line,
+                        "urlRegex": f".*{location}.*",
+                        "condition": options.get('condition', '')
+                    })
+        
+        return {
+            "success": True,
+            "data": {
+                "type": breakpoint_type,
+                "target": target,
+                "message": f"Breakpoint set on {breakpoint_type}: {target}"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to set breakpoint: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="List all active breakpoints")
+async def list_breakpoints() -> Dict[str, Any]:
+    """List all currently set breakpoints"""
+    try:
+        return {
+            "success": True,
+            "data": {
+                "breakpoints": list(chrome.breakpoints.values()),
+                "count": len(chrome.breakpoints)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to list breakpoints: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Remove a breakpoint")
+async def remove_breakpoint(breakpoint_id: str) -> Dict[str, Any]:
+    """Remove a specific breakpoint"""
+    try:
+        await chrome.ensure_connected()
+        
+        if breakpoint_id in chrome.breakpoints:
+            await chrome._send_command("Debugger.removeBreakpoint", {
+                "breakpointId": breakpoint_id
+            })
+            del chrome.breakpoints[breakpoint_id]
+            
+        return {
+            "success": True,
+            "data": {"message": f"Breakpoint {breakpoint_id} removed"}
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to remove breakpoint: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Get information about the paused state when debugger is paused")
+async def get_paused_info() -> Dict[str, Any]:
+    """Get information about current paused state"""
+    try:
+        if chrome.paused_data:
+            return {
+                "success": True,
+                "data": chrome.paused_data
+            }
+        else:
+            return {
+                "success": True,
+                "data": {"message": "Debugger is not currently paused"}
+            }
+            
+    except Exception as e:
+        logger.error(f"Failed to get paused info: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Resume execution when debugger is paused")
+async def resume_execution() -> Dict[str, Any]:
+    """Resume execution from a breakpoint"""
+    try:
+        await chrome.ensure_connected()
+        await chrome._send_command("Debugger.resume")
+        chrome.paused_data = None
+        
+        return {
+            "success": True,
+            "data": {"message": "Execution resumed"}
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to resume execution: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Step over the current line when debugger is paused")
+async def step_over() -> Dict[str, Any]:
+    """Step over the current line"""
+    try:
+        await chrome.ensure_connected()
+        await chrome._send_command("Debugger.stepOver")
+        
+        return {
+            "success": True,
+            "data": {"message": "Stepped over"}
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to step over: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 @mcp.tool(description="Close the Chrome browser instance")
 async def close_chrome() -> Dict[str, Any]:
     """Close Chrome browser"""
@@ -763,6 +1226,6 @@ if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     
     logger.info(f"Starting Chrome DevTools MCP server on {host}:{port}")
-    logger.info("Tools available: launch_chrome, navigate_to, get_dom_tree, query_elements, get_network_logs, get_console_logs, execute_javascript, take_screenshot, get_page_info, close_chrome")
+    logger.info("Tools available: launch_chrome, connect_remote_chrome, connect_websocket_url, list_available_targets, navigate_to, get_dom_tree, query_elements, get_network_logs, get_console_logs, execute_javascript, take_screenshot, get_page_info, set_breakpoint, list_breakpoints, remove_breakpoint, get_paused_info, resume_execution, step_over, close_chrome")
     
     uvicorn.run(app, host=host, port=port)

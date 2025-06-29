@@ -9,6 +9,7 @@
 本项目提供了一套完整的 Chrome 浏览器控制工具，让 AI 能够：
 
 - 🚀 **启动和控制 Chrome 浏览器** - 自动启动开发环境的 Chrome 实例
+- 🔗 **远程连接 CDP** - 连接到已运行的 Chrome、Electron 或其他 V8 内核程序
 - 🔍 **DOM 查询和分析** - 获取页面 DOM 树结构，查询特定元素
 - 🌐 **网络请求监控** - 实时捕获和分析所有网络请求和响应
 - 📝 **Console 日志捕获** - 获取所有控制台输出，包括错误、警告和日志
@@ -16,6 +17,8 @@
 - 🎯 **页面导航** - 控制浏览器导航到指定 URL
 - 📸 **截图功能** - 捕获当前页面的截图
 - ℹ️ **页面信息获取** - 获取页面标题、URL、元数据等信息
+- 🐛 **JavaScript 断点调试** - 设置各种类型的断点，支持条件断点
+- 🎮 **调试控制** - 暂停、继续、单步执行等调试操作
 
 ## 第一部分：开发、安装和启动
 
@@ -142,6 +145,9 @@ claude-code
 
 你应该能看到以下工具：
 - launch_chrome
+- connect_remote_chrome
+- connect_websocket_url
+- list_available_targets
 - navigate_to
 - get_dom_tree
 - query_elements
@@ -150,6 +156,12 @@ claude-code
 - execute_javascript
 - take_screenshot
 - get_page_info
+- set_breakpoint
+- list_breakpoints
+- remove_breakpoint
+- get_paused_info
+- resume_execution
+- step_over
 - close_chrome
 
 ## 第三部分：Cursor 接入指南
@@ -214,6 +226,9 @@ claude-code
 
 你应该能看到以下工具：
 - launch_chrome
+- connect_remote_chrome
+- connect_websocket_url
+- list_available_targets
 - navigate_to
 - get_dom_tree
 - query_elements
@@ -222,6 +237,12 @@ claude-code
 - execute_javascript
 - take_screenshot
 - get_page_info
+- set_breakpoint
+- list_breakpoints
+- remove_breakpoint
+- get_paused_info
+- resume_execution
+- step_over
 - close_chrome
 
 ### 故障排除
@@ -302,6 +323,46 @@ claude-code
 4. 获取性能数据
 ```
 
+#### 场景4：调试登录按钮点击事件
+
+```
+1. 使用 connect_remote_chrome 连接到已运行的应用
+2. 使用 query_elements 找到登录按钮选择器（如 '#login-btn'）
+3. 使用 set_breakpoint('dom', '#login-btn') 在登录按钮上设置断点
+4. 点击登录按钮，调试器会暂停
+5. 使用 get_console_logs 查看控制台输出
+6. 使用 get_paused_info 查看暂停位置和调用栈
+7. 使用 resume_execution 继续执行
+```
+
+#### 场景5：调试远程 Electron 应用
+
+```
+1. 启动 Electron 应用时添加 --remote-debugging-port=9222 参数
+2. 使用 connect_remote_chrome('localhost', 9222) 连接
+3. 使用各种调试工具进行分析
+4. 设置断点并调试特定功能
+```
+
+#### 场景6：在多个标签页之间切换
+
+```
+1. 使用 list_available_targets() 列出所有可用的标签页
+2. 选择目标标签页的 webSocketDebuggerUrl
+3. 使用 connect_websocket_url(ws_url) 切换到该标签页
+4. 现在所有操作都会在新的标签页上执行
+```
+
+示例代码：
+```
+# 列出所有标签页
+targets = list_available_targets()
+# 选择第二个标签页
+ws_url = targets['data']['targets'][1]['webSocketDebuggerUrl']
+# 切换到该标签页
+connect_websocket_url(ws_url)
+```
+
 ## API 工具详细说明
 
 ### launch_chrome
@@ -310,6 +371,31 @@ claude-code
 参数：
 - `headless` (bool): 是否无头模式运行，默认 false
 - `port` (int): 远程调试端口，默认 9222
+
+### connect_remote_chrome
+连接到远程 Chrome/Chromium 实例（如 Electron 应用）。
+
+参数：
+- `host` (str): 远程主机地址，默认 localhost
+- `port` (int): 远程调试端口，默认 9222
+
+### connect_websocket_url
+直接使用 WebSocket URL 连接到特定的调试会话。
+
+参数：
+- `ws_url` (str): WebSocket 调试器 URL，如 'ws://localhost:9222/devtools/page/ABC123'
+
+使用场景：
+- 切换不同的标签页/页面
+- 连接到特定的调试会话
+- 从其他工具获取的 WebSocket URL
+
+### list_available_targets
+列出所有可用的 Chrome 标签页/页面及其 WebSocket URL。
+
+参数：
+- `host` (str): Chrome 主机地址，默认 localhost
+- `port` (int): Chrome 调试端口，默认 9222
 
 ### navigate_to
 导航到指定 URL。
@@ -360,6 +446,46 @@ claude-code
 
 ### close_chrome
 关闭 Chrome 浏览器实例。
+
+无参数。
+
+### set_breakpoint
+设置 JavaScript 断点。
+
+参数：
+- `breakpoint_type` (str): 断点类型 - 'dom', 'event', 'function', 'xhr', 'line'
+- `target` (str): 断点目标（如 DOM 选择器、函数名、URL:行号）
+- `options` (dict, optional): 额外选项，如条件、动作等
+
+示例：
+- DOM 断点：`set_breakpoint('dom', '#login-button')`
+- 函数断点：`set_breakpoint('function', 'handleLogin')`
+- 行断点：`set_breakpoint('line', 'app.js:42')`
+- XHR 断点：`set_breakpoint('xhr', '/api/login')`
+
+### list_breakpoints
+列出所有活动断点。
+
+无参数。
+
+### remove_breakpoint
+移除指定断点。
+
+参数：
+- `breakpoint_id` (str): 断点 ID
+
+### get_paused_info
+获取调试器暂停时的信息。
+
+无参数。
+
+### resume_execution
+从断点恢复执行。
+
+无参数。
+
+### step_over
+单步跳过当前行。
 
 无参数。
 
