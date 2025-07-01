@@ -44,6 +44,63 @@ await set_breakpoint('dom', '#submit-button', {
 })
 ```
 
+## JavaScript 代码分析工具
+
+在设置断点之前，AI 需要理解代码结构。以下工具提供了完整的代码可见性：
+
+### 1. 发现脚本源
+
+```python
+# 获取所有加载的脚本
+scripts = await get_script_sources()
+for script in scripts['data']['scripts']:
+    print(f"Script: {script['url']}, ID: {script['scriptId']}")
+
+# 读取特定脚本的源代码
+source = await get_script_source(script_id)
+print(source['data']['source'])
+```
+
+### 2. 搜索代码
+
+```python
+# 搜索特定函数
+results = await search_in_scripts('handleLogin', 'function')
+for match in results['data']['matches']:
+    print(f"Found at line {match['lineNumber']}: {match['line']}")
+
+# 搜索错误处理
+errors = await search_in_scripts('console.error', 'text')
+
+# 搜索类定义
+classes = await search_in_scripts('UserManager', 'class')
+```
+
+### 3. 智能断点设置流程
+
+```python
+# AI 工作流程示例
+async def debug_login_issue():
+    # 1. 找到登录按钮的处理函数
+    elements = await query_elements('#login-button')
+    onclick = elements['data']['elements'][0]['attributes']['onclick']
+    
+    # 2. 搜索该函数的定义
+    func_name = extract_function_name(onclick)  # e.g., "handleLogin"
+    search_result = await search_in_scripts(func_name, 'function')
+    
+    # 3. 读取函数代码以理解调用链
+    if search_result['data']['matches']:
+        script_id = search_result['data']['matches'][0]['scriptId']
+        source = await get_script_source(script_id)
+        
+        # 4. 分析代码并设置策略性断点
+        await set_breakpoint('function', func_name, {
+            'logMessage': f'{func_name} called',
+            'pause': False
+        })
+```
+
 ## 常用调试模式
 
 ### 1. 登录按钮调试示例

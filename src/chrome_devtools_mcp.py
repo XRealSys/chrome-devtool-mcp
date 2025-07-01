@@ -976,24 +976,32 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
             await chrome._send_command("Runtime.evaluate", {
                 "expression": f"""
                     (function() {{
-                        const originalFunc = window['{target}'] || eval('{target}');
-                        if (typeof originalFunc === 'function') {{
-                            const wrapped = function(...args) {{
-                                {f"if ({condition}) {{" if condition else ""}
-                                console.log('🔍 BREAKPOINT:', '{func_log_msg}', {{
-                                    function: '{target}',
-                                    arguments: args,
-                                    timestamp: new Date().toISOString(),
-                                    caller: arguments.callee.caller ? arguments.callee.caller.name : 'anonymous',
-                                    this: this
-                                }});
-                                {"debugger;" if should_pause else ""}
-                                {f"}}" if condition else ""}
-                                return originalFunc.apply(this, args);
-                            }};
-                            if (window['{target}']) {{
+                        try {{
+                            const originalFunc = window['{target}'];
+                            if (typeof originalFunc === 'function') {{
+                                const wrapped = function(...args) {{
+                                    {f"if ({condition}) {{" if condition else ""}
+                                    console.log('🔍 BREAKPOINT:', '{func_log_msg}', {{
+                                        function: '{target}',
+                                        arguments: args,
+                                        timestamp: new Date().toISOString(),
+                                        thisContext: this
+                                    }});
+                                    {"debugger;" if should_pause else ""}
+                                    {f"}}" if condition else ""}
+                                    return originalFunc.apply(this, args);
+                                }};
                                 window['{target}'] = wrapped;
+                                // Also update global reference if it exists
+                                if (typeof {target} !== 'undefined' && {target} === originalFunc) {{
+                                    {target} = wrapped;
+                                }}
+                                return 'Function breakpoint set successfully';
+                            }} else {{
+                                return 'Function not found: ' + '{target}';
                             }}
+                        }} catch (e) {{
+                            return 'Error setting breakpoint: ' + e.message;
                         }}
                     }})()
                 """
@@ -1182,6 +1190,229 @@ async def step_over() -> Dict[str, Any]:
         }
 
 
+@mcp.tool(description="Get all JavaScript sources loaded in the current page. Useful for understanding code structure before setting breakpoints.")
+async def get_script_sources() -> Dict[str, Any]:
+    """Get all script sources with their IDs and URLs"""
+    try:
+        await chrome.ensure_connected()
+        
+        scripts = []
+        for script_id, script_info in chrome.scripts.items():
+            scripts.append({
+                "scriptId": script_id,
+                "url": script_info['url'],
+                "startLine": script_info['startLine'],
+                "endLine": script_info['endLine']
+            })
+        
+        return {
+            "success": True,
+            "data": {
+                "scripts": scripts,
+                "count": len(scripts)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get script sources: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Get the source code of a specific script. Use this to read JavaScript code before setting breakpoints.")
+async def get_script_source(script_id: str) -> Dict[str, Any]:
+    """Get the source code of a specific script by its ID"""
+    try:
+        await chrome.ensure_connected()
+        
+        result = await chrome._send_command("Debugger.getScriptSource", {
+            "scriptId": script_id
+        })
+        
+        source = result.get('scriptSource', '')
+        
+        # Also get script info
+        script_info = chrome.scripts.get(script_id, {})
+        
+        return {
+            "success": True,
+            "data": {
+                "scriptId": script_id,
+                "url": script_info.get('url', 'unknown'),
+                "source": source,
+                "length": len(source),
+                "lineCount": source.count('\n') + 1
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get script source: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Search for functions, classes, or patterns in all loaded JavaScript code. Helps locate where to set breakpoints.")
+async def search_in_scripts(pattern: str, search_type: str = "function") -> Dict[str, Any]:
+    """
+    Search for patterns in all loaded scripts
+    
+    Args:
+        pattern: What to search for (e.g., function name, class name, text)
+        search_type: Type of search - 'function', 'class', 'variable', 'text'
+    """
+    try:
+        await chrome.ensure_connected()
+        
+        matches = []
+        
+        # Build search regex based on type
+        if search_type == "function":
+            # Match function declarations and expressions
+            regex_patterns = [
+                f"function\\s+{pattern}\\s*\\(",
+                f"{pattern}\\s*:\\s*function\\s*\\(",
+                f"{pattern}\\s*=\\s*function\\s*\\(",
+                f"{pattern}\\s*=\\s*\\([^)]*\\)\\s*=>",
+                f"const\\s+{pattern}\\s*=",
+                f"let\\s+{pattern}\\s*=",
+                f"var\\s+{pattern}\\s*="
+            ]
+        elif search_type == "class":
+            regex_patterns = [f"class\\s+{pattern}\\s*[{{\\s]"]
+        elif search_type == "variable":
+            regex_patterns = [
+                f"const\\s+{pattern}\\s*=",
+                f"let\\s+{pattern}\\s*=",
+                f"var\\s+{pattern}\\s*="
+            ]
+        else:  # text search
+            regex_patterns = [pattern]
+        
+        # Search in each script
+        for script_id, script_info in chrome.scripts.items():
+            try:
+                # Get script source
+                result = await chrome._send_command("Debugger.getScriptSource", {
+                    "scriptId": script_id
+                })
+                source = result.get('scriptSource', '')
+                
+                if not source:
+                    continue
+                
+                # Search for patterns
+                lines = source.split('\n')
+                for line_num, line in enumerate(lines):
+                    for regex_pattern in regex_patterns:
+                        import re
+                        if re.search(regex_pattern, line, re.IGNORECASE):
+                            matches.append({
+                                "scriptId": script_id,
+                                "url": script_info['url'],
+                                "lineNumber": line_num + 1,  # 1-based
+                                "line": line.strip(),
+                                "pattern": pattern,
+                                "type": search_type
+                            })
+                            
+            except Exception as e:
+                logger.warning(f"Failed to search in script {script_id}: {e}")
+                continue
+        
+        return {
+            "success": True,
+            "data": {
+                "matches": matches,
+                "count": len(matches),
+                "searchPattern": pattern,
+                "searchType": search_type
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to search in scripts: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Get all functions defined in the current page. Useful for understanding what functions are available to debug.")
+async def get_page_functions() -> Dict[str, Any]:
+    """Get all functions defined in the page context"""
+    try:
+        await chrome.ensure_connected()
+        
+        # Execute JavaScript to find all functions
+        result = await chrome._send_command("Runtime.evaluate", {
+            "expression": """
+                (function() {
+                    const functions = [];
+                    
+                    // Get global functions
+                    for (let prop in window) {
+                        try {
+                            if (typeof window[prop] === 'function' && 
+                                !prop.startsWith('_') && 
+                                !['webkitStorageInfo', 'webkitRequestAnimationFrame'].includes(prop)) {
+                                functions.push({
+                                    name: prop,
+                                    type: 'global',
+                                    source: window[prop].toString().substring(0, 100) + '...'
+                                });
+                            }
+                        } catch (e) {}
+                    }
+                    
+                    // Try to find functions in common patterns
+                    const checkObject = (obj, prefix) => {
+                        if (!obj || typeof obj !== 'object') return;
+                        try {
+                            Object.keys(obj).forEach(key => {
+                                if (typeof obj[key] === 'function') {
+                                    functions.push({
+                                        name: prefix + '.' + key,
+                                        type: 'method',
+                                        source: obj[key].toString().substring(0, 100) + '...'
+                                    });
+                                }
+                            });
+                        } catch (e) {}
+                    };
+                    
+                    // Check common namespaces
+                    ['app', 'App', 'utils', 'Utils', 'api', 'API'].forEach(ns => {
+                        if (window[ns]) checkObject(window[ns], ns);
+                    });
+                    
+                    return functions;
+                })()
+            """,
+            "returnByValue": True
+        })
+        
+        functions = []
+        if result and 'result' in result and 'value' in result['result']:
+            functions = result['result']['value']
+        
+        return {
+            "success": True,
+            "data": {
+                "functions": functions,
+                "count": len(functions)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get page functions: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 @mcp.tool(description="Close the Chrome browser instance")
 async def close_chrome() -> Dict[str, Any]:
     """Close Chrome browser"""
@@ -1269,6 +1500,6 @@ if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     
     logger.info(f"Starting Chrome DevTools MCP server on {host}:{port}")
-    logger.info("Tools available: launch_chrome, connect_remote_chrome, connect_websocket_url, list_available_targets, navigate_to, get_dom_tree, query_elements, get_network_logs, get_console_logs, execute_javascript, take_screenshot, get_page_info, set_breakpoint, list_breakpoints, remove_breakpoint, get_paused_info, resume_execution, step_over, close_chrome")
+    logger.info("Tools available: launch_chrome, connect_remote_chrome, connect_websocket_url, list_available_targets, navigate_to, get_dom_tree, query_elements, get_network_logs, get_console_logs, execute_javascript, take_screenshot, get_page_info, get_script_sources, get_script_source, search_in_scripts, get_page_functions, set_breakpoint, list_breakpoints, remove_breakpoint, get_paused_info, resume_execution, step_over, close_chrome")
     
     uvicorn.run(app, host=host, port=port)

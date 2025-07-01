@@ -156,6 +156,10 @@ claude-code
 - execute_javascript
 - take_screenshot
 - get_page_info
+- get_script_sources
+- get_script_source
+- search_in_scripts
+- get_page_functions
 - set_breakpoint
 - list_breakpoints
 - remove_breakpoint
@@ -237,6 +241,10 @@ claude-code
 - execute_javascript
 - take_screenshot
 - get_page_info
+- get_script_sources
+- get_script_source
+- search_in_scripts
+- get_page_functions
 - set_breakpoint
 - list_breakpoints
 - remove_breakpoint
@@ -491,6 +499,33 @@ connect_websocket_url(ws_url)
 
 ### step_over
 单步跳过当前行。
+
+无参数。
+
+### get_script_sources
+获取当前页面加载的所有 JavaScript 源代码列表。
+
+无参数。
+
+返回：
+- scripts: 脚本列表，包含 scriptId、url、startLine、endLine
+- count: 脚本总数
+
+### get_script_source
+获取特定脚本的源代码。
+
+参数：
+- `script_id` (str): 脚本 ID（从 get_script_sources 获取）
+
+### search_in_scripts
+在所有加载的脚本中搜索函数、类或文本。
+
+参数：
+- `pattern` (str): 搜索模式（如函数名、类名、文本）
+- `search_type` (str): 搜索类型 - 'function'、'class'、'variable'、'text'
+
+### get_page_functions
+获取页面中定义的所有函数。
 
 无参数。
 
