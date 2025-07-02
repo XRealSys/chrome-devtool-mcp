@@ -53,6 +53,15 @@ class ChromeInstance:
         self.console_logs: List[Dict] = []
         self.network_logs: List[Dict] = []
         self.debugging_port: int = 9222
+        # Track enabled domains
+        self.enabled_domains: Dict[str, bool] = {
+            'Runtime': False,
+            'Page': False,
+            'Network': False,
+            'DOM': False,
+            'Console': False,
+            'Debugger': False
+        }
         
     async def connect_remote(self, host: str = "localhost", port: int = 9222) -> Dict[str, Any]:
         """Connect to a remote Chrome/Chromium instance via CDP"""
@@ -256,6 +265,10 @@ class ChromeInstance:
             self.scripts.clear()
         if hasattr(self, 'paused_data'):
             self.paused_data = None
+        
+        # Reset enabled domains
+        for domain in self.enabled_domains:
+            self.enabled_domains[domain] = False
             
         logger.info("Disconnected from Chrome DevTools")
     
@@ -269,31 +282,35 @@ class ChromeInstance:
         # Start message listener
         self._listener_task = asyncio.create_task(self._message_listener())
         
-        # Enable necessary domains
-        try:
-            await self._send_command("Runtime.enable")
-            await self._send_command("Page.enable")
-            await self._send_command("Network.enable")
-            await self._send_command("DOM.enable")
-            await self._send_command("Console.enable")
-            logger.info("Successfully enabled all Chrome DevTools domains")
-        except Exception as e:
-            logger.error(f"Error enabling Chrome DevTools domains: {e}")
-            raise
+        # Enable necessary domains - try each one separately
+        domains_to_enable = ['Runtime', 'Page', 'Network', 'DOM', 'Console', 'Debugger']
+        enabled_count = 0
         
-        # Enable Debugger domain for breakpoints
-        try:
-            await self._send_command("Debugger.enable")
-            logger.info("Successfully enabled Debugger domain")
-        except Exception as e:
-            logger.warning(f"Could not enable Debugger domain: {e}")
+        for domain in domains_to_enable:
+            try:
+                await self._send_command(f"{domain}.enable")
+                self.enabled_domains[domain] = True
+                enabled_count += 1
+                logger.info(f"Successfully enabled {domain} domain")
+            except Exception as e:
+                self.enabled_domains[domain] = False
+                logger.warning(f"Could not enable {domain} domain: {e}")
         
-        # Set up event handlers
-        self.event_handlers['Console.messageAdded'] = self._handle_console_message
-        self.event_handlers['Network.requestWillBeSent'] = self._handle_network_request
-        self.event_handlers['Network.responseReceived'] = self._handle_network_response
-        self.event_handlers['Debugger.paused'] = self._handle_debugger_paused
-        self.event_handlers['Debugger.scriptParsed'] = self._handle_script_parsed
+        if enabled_count == 0:
+            logger.error("Failed to enable any Chrome DevTools domains")
+            raise Exception("Could not enable any Chrome DevTools domains")
+        else:
+            logger.info(f"Enabled {enabled_count}/{len(domains_to_enable)} Chrome DevTools domains")
+        
+        # Set up event handlers only for enabled domains
+        if self.enabled_domains.get('Console', False):
+            self.event_handlers['Console.messageAdded'] = self._handle_console_message
+        if self.enabled_domains.get('Network', False):
+            self.event_handlers['Network.requestWillBeSent'] = self._handle_network_request
+            self.event_handlers['Network.responseReceived'] = self._handle_network_response
+        if self.enabled_domains.get('Debugger', False):
+            self.event_handlers['Debugger.paused'] = self._handle_debugger_paused
+            self.event_handlers['Debugger.scriptParsed'] = self._handle_script_parsed
         
         # Storage for breakpoints and scripts
         self.breakpoints = {}
@@ -461,6 +478,10 @@ class ChromeInstance:
                 'endLine': params.get('endLine', 0),
                 'endColumn': params.get('endColumn', 0)
             }
+    
+    def get_enabled_domains(self) -> Dict[str, bool]:
+        """Get the status of enabled domains"""
+        return self.enabled_domains.copy()
         
     async def close(self):
         """Close Chrome instance and WebSocket connection"""
@@ -625,6 +646,13 @@ async def navigate_to(url: str) -> Dict[str, Any]:
     try:
         await chrome.ensure_connected()
         
+        # Check if Page domain is enabled
+        if not chrome.enabled_domains.get('Page', False):
+            return {
+                "success": False,
+                "error": "Page domain is not enabled. Some debugging endpoints may have limited functionality."
+            }
+        
         result = await chrome._send_command("Page.navigate", {"url": url})
         
         # Wait for page to start loading
@@ -654,6 +682,13 @@ async def get_dom_tree(depth: int = 3) -> Dict[str, Any]:
     """Get DOM tree structure"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if DOM domain is enabled
+        if not chrome.enabled_domains.get('DOM', False):
+            return {
+                "success": False,
+                "error": "DOM domain is not enabled. Cannot access DOM tree."
+            }
         
         # Get document
         doc = await chrome._send_command("DOM.getDocument", {"depth": depth})
@@ -690,6 +725,13 @@ async def query_elements(selector: str) -> Dict[str, Any]:
     """Query DOM elements by CSS selector"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if Runtime domain is enabled
+        if not chrome.enabled_domains.get('Runtime', False):
+            return {
+                "success": False,
+                "error": "Runtime domain is not enabled. Cannot execute JavaScript to query elements."
+            }
         
         # Execute JavaScript to query elements
         result = await chrome._send_command("Runtime.evaluate", {
@@ -732,6 +774,13 @@ async def query_elements(selector: str) -> Dict[str, Any]:
 async def get_network_logs(filter_url: Optional[str] = None) -> Dict[str, Any]:
     """Get network request logs"""
     try:
+        # Check if Network domain is enabled
+        if not chrome.enabled_domains.get('Network', False):
+            return {
+                "success": False,
+                "error": "Network domain is not enabled. Network logging is not available."
+            }
+        
         logs = chrome.network_logs
         
         if filter_url:
@@ -756,6 +805,13 @@ async def get_network_logs(filter_url: Optional[str] = None) -> Dict[str, Any]:
 async def get_console_logs(level: Optional[str] = None) -> Dict[str, Any]:
     """Get console logs"""
     try:
+        # Check if Console domain is enabled
+        if not chrome.enabled_domains.get('Console', False):
+            return {
+                "success": False,
+                "error": "Console domain is not enabled. Console logging is not available."
+            }
+        
         logs = chrome.console_logs
         
         if level:
@@ -781,6 +837,13 @@ async def execute_javascript(code: str) -> Dict[str, Any]:
     """Execute JavaScript in the page context"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if Runtime domain is enabled
+        if not chrome.enabled_domains.get('Runtime', False):
+            return {
+                "success": False,
+                "error": "Runtime domain is not enabled. Cannot execute JavaScript."
+            }
         
         result = await chrome._send_command("Runtime.evaluate", {
             "expression": code,
@@ -814,6 +877,18 @@ async def take_screenshot(full_page: bool = False) -> Dict[str, Any]:
     """Take a screenshot of the current page"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if required domains are enabled
+        if not chrome.enabled_domains.get('Page', False):
+            return {
+                "success": False,
+                "error": "Page domain is not enabled. Cannot take screenshots."
+            }
+        if not chrome.enabled_domains.get('Runtime', False):
+            return {
+                "success": False,
+                "error": "Runtime domain is not enabled. Cannot check page state for screenshot."
+            }
         
         # Navigate to a simple page first if on extension page
         current_url = await chrome._send_command("Runtime.evaluate", {
@@ -881,6 +956,13 @@ async def get_page_info() -> Dict[str, Any]:
     try:
         await chrome.ensure_connected()
         
+        # Check if Runtime domain is enabled
+        if not chrome.enabled_domains.get('Runtime', False):
+            return {
+                "success": False,
+                "error": "Runtime domain is not enabled. Cannot get page information."
+            }
+        
         # Get page info using JavaScript
         result = await chrome._send_command("Runtime.evaluate", {
             "expression": """
@@ -932,6 +1014,23 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
     try:
         await chrome.ensure_connected()
         options = options or {}
+        
+        # Check required domains based on breakpoint type
+        if breakpoint_type in ['dom', 'function'] and not chrome.enabled_domains.get('Runtime', False):
+            return {
+                "success": False,
+                "error": f"Runtime domain is not enabled. Cannot set {breakpoint_type} breakpoint."
+            }
+        elif breakpoint_type in ['event', 'xhr'] and not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": f"Debugger domain is not enabled. Cannot set {breakpoint_type} breakpoint."
+            }
+        elif breakpoint_type in ['line', 'logpoint'] and not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": f"Debugger domain is not enabled. Cannot set {breakpoint_type} breakpoint."
+            }
         
         # Determine if this should pause execution
         should_pause = options.get('pause', breakpoint_type != 'logpoint')
@@ -1107,6 +1206,13 @@ async def remove_breakpoint(breakpoint_id: str) -> Dict[str, Any]:
     try:
         await chrome.ensure_connected()
         
+        # Check if Debugger domain is enabled
+        if not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": "Debugger domain is not enabled. Cannot remove breakpoints."
+            }
+        
         if breakpoint_id in chrome.breakpoints:
             await chrome._send_command("Debugger.removeBreakpoint", {
                 "breakpointId": breakpoint_id
@@ -1154,6 +1260,13 @@ async def resume_execution() -> Dict[str, Any]:
     """Resume execution from a breakpoint"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if Debugger domain is enabled
+        if not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": "Debugger domain is not enabled. Cannot control execution."
+            }
         await chrome._send_command("Debugger.resume")
         chrome.paused_data = None
         
@@ -1175,6 +1288,13 @@ async def step_over() -> Dict[str, Any]:
     """Step over the current line"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if Debugger domain is enabled
+        if not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": "Debugger domain is not enabled. Cannot control execution."
+            }
         await chrome._send_command("Debugger.stepOver")
         
         return {
@@ -1195,6 +1315,13 @@ async def get_script_sources() -> Dict[str, Any]:
     """Get all script sources with their IDs and URLs"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if Debugger domain is enabled
+        if not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": "Debugger domain is not enabled. Script information is not available."
+            }
         
         scripts = []
         for script_id, script_info in chrome.scripts.items():
@@ -1225,6 +1352,13 @@ async def get_script_source(script_id: str) -> Dict[str, Any]:
     """Get the source code of a specific script by its ID"""
     try:
         await chrome.ensure_connected()
+        
+        # Check if Debugger domain is enabled
+        if not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": "Debugger domain is not enabled. Cannot get script source."
+            }
         
         result = await chrome._send_command("Debugger.getScriptSource", {
             "scriptId": script_id
@@ -1264,6 +1398,13 @@ async def search_in_scripts(pattern: str, search_type: str = "function") -> Dict
     """
     try:
         await chrome.ensure_connected()
+        
+        # Check if Debugger domain is enabled
+        if not chrome.enabled_domains.get('Debugger', False):
+            return {
+                "success": False,
+                "error": "Debugger domain is not enabled. Cannot search in scripts."
+            }
         
         matches = []
         
@@ -1345,6 +1486,13 @@ async def get_page_functions() -> Dict[str, Any]:
     try:
         await chrome.ensure_connected()
         
+        # Check if Runtime domain is enabled
+        if not chrome.enabled_domains.get('Runtime', False):
+            return {
+                "success": False,
+                "error": "Runtime domain is not enabled. Cannot get page functions."
+            }
+        
         # Execute JavaScript to find all functions
         result = await chrome._send_command("Runtime.evaluate", {
             "expression": """
@@ -1407,6 +1555,31 @@ async def get_page_functions() -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Failed to get page functions: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool(description="Get the status of enabled Chrome DevTools domains")
+async def get_enabled_domains() -> Dict[str, Any]:
+    """Get which Chrome DevTools domains are currently enabled"""
+    try:
+        if not chrome.ws:
+            return {
+                "success": False,
+                "error": "Not connected to Chrome DevTools"
+            }
+        
+        return {
+            "success": True,
+            "data": {
+                "enabled_domains": chrome.get_enabled_domains(),
+                "connected": True
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get enabled domains: {e}")
         return {
             "success": False,
             "error": str(e)
@@ -1500,6 +1673,6 @@ if __name__ == "__main__":
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     
     logger.info(f"Starting Chrome DevTools MCP server on {host}:{port}")
-    logger.info("Tools available: launch_chrome, connect_remote_chrome, connect_websocket_url, list_available_targets, navigate_to, get_dom_tree, query_elements, get_network_logs, get_console_logs, execute_javascript, take_screenshot, get_page_info, get_script_sources, get_script_source, search_in_scripts, get_page_functions, set_breakpoint, list_breakpoints, remove_breakpoint, get_paused_info, resume_execution, step_over, close_chrome")
+    logger.info("Tools available: launch_chrome, connect_remote_chrome, connect_websocket_url, list_available_targets, navigate_to, get_dom_tree, query_elements, get_network_logs, get_console_logs, execute_javascript, take_screenshot, get_page_info, get_script_sources, get_script_source, search_in_scripts, get_page_functions, set_breakpoint, list_breakpoints, remove_breakpoint, get_paused_info, resume_execution, step_over, get_enabled_domains, close_chrome")
     
     uvicorn.run(app, host=host, port=port)
