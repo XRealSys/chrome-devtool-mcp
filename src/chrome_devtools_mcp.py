@@ -1163,6 +1163,14 @@ async def set_breakpoint(breakpoint_type: str, target: str, options: Optional[Di
                         "urlRegex": f".*{location}.*",
                         "condition": condition_expr
                     })
+
+                    if 'breakpointId' in result:
+                        chrome.breakpoints[result['breakpointId']] = {
+                            'type': breakpoint_type,
+                            'location': target,
+                            'actualLocation': result.get('locations'),
+                            'logMessage': log_message if breakpoint_type == 'logpoint' else None
+                        }
         
         return {
             "success": True,
